@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -43,15 +44,17 @@ void main() {
       final row = workbook.tables['Sheet1']!.rows[2];
 
       expect(_text(row[0]?.value), 'Cotton Kurti');
-      expect(_text(row[2]?.value), 'DemoBrand');
+      // The source store's brand is never copied into the listing.
+      expect(_text(row[2]?.value), '');
       expect(_text(row[3]?.value), '999');
       expect(_text(row[4]?.value), '799');
       expect(_text(row[5]?.value), 'Blue');
-      expect(_text(row[6]?.value), 'https://cdn.example.com/1.jpg');
-      expect(_text(row[7]?.value), 'https://cdn.example.com/2.jpg');
+      expect(_text(row[6]?.value), '');
+      expect(_text(row[7]?.value), '');
       expect(_text(row[8]?.value), 'kurti, cotton');
       expect(_text(row[9]?.value), 'Soft fabric');
-      expect(_text(row[10]?.value), 'https://example.com/p/1');
+      // Links to another marketplace are never written.
+      expect(_text(row[10]?.value), '');
       expect(_text(row[11]?.value), 'KEEP');
     });
 
@@ -80,8 +83,14 @@ void main() {
       expect(byHeader['Image 1 (Front)'], 'photo:1');
       expect(byHeader['Image 2'], 'photo:2');
       expect(byHeader['Brand Name'], 'brand');
-      expect(byHeader['Manufacturer Name'], isNull);
-      expect(byHeader['Packer Name'], isNull);
+      expect(byHeader['Inventory'], 'inventory');
+      expect(byHeader['Net Weight (gms)'], 'weight');
+      expect(byHeader['Manufacturer Name'], 'makerName');
+      expect(byHeader['Packer Pincode'], 'makerPincode');
+      expect(byHeader['Manufacturer Address'], 'makerAddress');
+      expect(byHeader['Importer Name'], 'makerName');
+      expect(byHeader['Country of Origin'], 'country');
+
       expect(byHeader['Generic Name'], isNull);
       expect(byHeader['Wrong/Defective Returns Price'], isNull);
 
@@ -93,8 +102,19 @@ void main() {
       expect(_text(row[5]?.value), '799');
       expect(_text(row[7]?.value), '999');
       expect(_text(row[22]?.value), 'Blue');
-      expect(_text(row[35]?.value), 'https://cdn.example.com/1.jpg');
-      expect(_text(row[13]?.value), '');
+      expect(_text(row[35]?.value), '');
+      expect(_text(row[13]?.value), 'Mahvin Enterprise');
+      expect(_text(row[16]?.value), 'Mahvin Enterprise');
+      expect(_text(row[15]?.value), '382350');
+      expect(_text(row[18]?.value), '382350');
+      expect(_text(row[14]?.value), 'Ahmedabad');
+      expect(_text(row[17]?.value), 'Ahmedabad');
+      expect(_text(row[12]?.value), 'India');
+      expect(_text(row[19]?.value), 'Mahvin Enterprise');
+      expect(_text(row[20]?.value), 'Ahmedabad');
+      expect(_text(row[21]?.value), '382350');
+      expect(_text(row[10]?.value), '200');
+      expect(_text(row[11]?.value), '10');
       expect(row[6]?.value, isA<FormulaCellValue>());
 
       // Everything except the filled row and shared strings is untouched.
@@ -135,6 +155,325 @@ void main() {
       expect(_text(row[hsn.columnIndex]?.value), '6109');
       expect(_text(row[color.columnIndex]?.value), 'Red');
       expect(_text(row[0]?.value), 'Cotton Kurti');
+
+      final cleared = service.fill(
+        template,
+        product,
+        edits: {color.columnIndex: ''},
+      );
+      final clearedRow = Excel.decodeBytes(cleared).tables['Sheet1']!.rows[2];
+      expect(_text(clearedRow[color.columnIndex]?.value), '');
+    });
+
+    test('reads the template dropdown lists and keeps only valid choices', () {
+      final file = File(
+        'meesho template file/'
+        'Tshirts-10000-EXTERNAL-MeeshoTemplate2PricesGSTIN.xlsx',
+      );
+      if (!file.existsSync()) return;
+      final product = _product();
+      final template = service.analyze(
+        file.readAsBytesSync(),
+        fileName: 'tshirts.xlsx',
+        product: product,
+      );
+      MeeshoTemplateColumn column(String header) =>
+          template.columns.firstWhere((c) => c.header == header);
+
+      expect(column('GST %').options, isNotEmpty);
+      expect(column('Country of Origin').options, contains('India'));
+      expect(column('Color').options.length, greaterThan(5));
+      expect(column('Product Name').options, isEmpty);
+      expect(column('Color').matchOption('blue'), isNotNull);
+
+      // "Blue" (a product spec) is a real choice; an unknown colour is not.
+      expect(
+        service.defaultValues(template, product)[column('Color').columnIndex],
+        'Blue',
+      );
+      final odd = ProductLinkData(
+        sourceUrl: 'https://x',
+        siteName: 's',
+        title: 'T',
+        fetchedAt: DateTime(2026),
+        specs: const [ProductSpec(label: 'Color', value: 'Zzz Unknown')],
+      );
+      final oddTemplate = service.analyze(
+        file.readAsBytesSync(),
+        fileName: 'tshirts.xlsx',
+        product: odd,
+      );
+      expect(
+        service.defaultValues(oddTemplate, odd)[column('Color').columnIndex],
+        '',
+      );
+    });
+
+    test('takes attribute columns from the product specifications', () {
+      final file = File(
+        'meesho template file/'
+        'Tshirts-10000-EXTERNAL-MeeshoTemplate2PricesGSTIN.xlsx',
+      );
+      if (!file.existsSync()) return;
+      final product = ProductLinkData(
+        sourceUrl: 'https://x',
+        siteName: 's',
+        title: 'Brand Full Sleeve Solid Men Polo Neck T-Shirt',
+        fetchedAt: DateTime(2026),
+        specs: const [
+          ProductSpec(label: 'Fabric', value: 'Cotton Blend'),
+          ProductSpec(label: 'Neck Type', value: 'Polo Neck'),
+          ProductSpec(label: 'Sleeve', value: 'Full Sleeve'),
+          ProductSpec(label: 'Pattern', value: 'Solid'),
+          ProductSpec(label: 'Pack of', value: '2'),
+          ProductSpec(label: 'Fit', value: 'Regular'),
+        ],
+      );
+      final template = service.analyze(
+        file.readAsBytesSync(),
+        fileName: 'tshirts.xlsx',
+        product: product,
+      );
+      final defaults = service.defaultValues(template, product);
+      final found = <String, String>{};
+      for (final column in template.columns) {
+        final value = defaults[column.columnIndex] ?? '';
+        found[column.header] = value;
+        // Dropdown columns only ever get one of the template's own choices.
+        if (column.options.isNotEmpty && value.isNotEmpty) {
+          expect(column.options, contains(value), reason: column.header);
+        }
+      }
+      expect(found['Neck'], isNotEmpty);
+      expect(found['Sleeve Length'], isNotEmpty);
+      expect(found['Pattern'], isNotEmpty);
+      expect(found['Net Quantity (N)'], '2');
+      // Never guessed from unrelated specifications.
+      expect(found['Length'], '');
+      expect(found['Sleeve Styling'], '');
+    });
+
+    test('fills "Enter Meesho Price" under a grouped price header', () {
+      // [enterColumn, customerColumn, customerFormula]
+      for (final layout in [
+        [1, 2, 'IF(B3>22,B3-22,"")'],
+        [2, 1, 'C3+22'],
+      ]) {
+        final enter = layout[0] as int;
+        final customer = layout[1] as int;
+        final excel = Excel.createExcel();
+        final sheet = excel['Sheet1'];
+        void put(int column, int row, CellValue value) =>
+            sheet
+                    .cell(
+                      CellIndex.indexByColumnRow(
+                        columnIndex: column,
+                        rowIndex: row,
+                      ),
+                    )
+                    .value =
+                value;
+        put(0, 0, TextCellValue('Product Name'));
+        put(1, 0, TextCellValue('Meesho Price'));
+        put(enter, 1, TextCellValue('Enter Meesho Price'));
+        put(customer, 1, TextCellValue('Customer Price'));
+        put(customer, 2, FormulaCellValue(layout[2] as String));
+        final template = service.analyze(
+          Uint8List.fromList(excel.encode()!),
+          fileName: 'template.xlsx',
+          product: _product(),
+        );
+
+        expect(template.dataRowNumber, 3, reason: '$layout');
+        final byHeader = {
+          for (final c in template.columns) c.header: c.fieldKey,
+        };
+        expect(byHeader['Enter Meesho Price'], 'price', reason: '$layout');
+        expect(byHeader['Customer Price'], isNull, reason: '$layout');
+
+        final filled = service.fill(template, _product());
+        final xml = utf8.decode(
+          ZipDecoder()
+                  .decodeBytes(filled)
+                  .findFile('xl/worksheets/sheet1.xml')!
+                  .content
+              as List<int>,
+        );
+        final enterRef = '${'ABC'[enter]}3';
+        final customerRef = '${'ABC'[customer]}3';
+        expect(xml, contains('<c r="$enterRef"><v>799</v></c>'));
+        // The auto-calculated price keeps its formula and gets its result.
+        final expected = customer == 2 ? '777' : '821';
+        expect(
+          RegExp('<c r="$customerRef"[^>]*><f>[^<]*</f><v>$expected</v></c>')
+              .hasMatch(xml),
+          isTrue,
+          reason: '$layout $xml',
+        );
+      }
+    });
+
+    test('replaces hint text such as "Enter Meesho Price" in the data row', () {
+      final excel = Excel.createExcel();
+      final sheet = excel['Sheet1'];
+      sheet.appendRow([
+        TextCellValue('Product Name'),
+        TextCellValue('Enter Meesho Price'),
+        TextCellValue('HSN Code'),
+      ]);
+      sheet.appendRow([
+        TextCellValue('Enter product name'),
+        TextCellValue('Enter Meesho Price'),
+        TextCellValue('Select HSN code'),
+      ]);
+      final template = service.analyze(
+        Uint8List.fromList(excel.encode()!),
+        fileName: 'template.xlsx',
+        product: _product(),
+      );
+      expect(template.dataRowNumber, 2);
+      expect(template.columns[1].fieldKey, 'price');
+      expect(template.columns[1].prefilled, isFalse);
+
+      final row = Excel.decodeBytes(service.fill(template, _product()))
+          .tables['Sheet1']!
+          .rows[1];
+      expect(_text(row[0]?.value), 'Cotton Kurti');
+      expect(_text(row[1]?.value), '799');
+      // Leftover hints are cleared rather than uploaded as values.
+      expect(_text(row[2]?.value), '');
+    });
+
+    test('finds the selling price under common header wordings', () {
+      for (final header in [
+        'Meesho Price',
+        '* Meesho Price (In Rs)',
+        'MEESHO PRICE (Inclusive of GST)',
+        'Selling Price incl. GST',
+      ]) {
+        final excel = Excel.createExcel();
+        excel['Sheet1'].appendRow([
+          TextCellValue('Product Name'),
+          TextCellValue(header),
+          TextCellValue('Wrong/Defective Returns Price'),
+        ]);
+        final template = service.analyze(
+          Uint8List.fromList(excel.encode()!),
+          fileName: 'template.xlsx',
+          product: _product(),
+        );
+        final byHeader = {
+          for (final c in template.columns) c.header: c.fieldKey,
+        };
+        expect(byHeader[template.columns[1].header], 'price', reason: header);
+        expect(byHeader['Wrong/Defective Returns Price'], isNull);
+        final row = Excel.decodeBytes(service.fill(template, _product()))
+            .tables['Sheet1']!
+            .rows[1];
+        expect(_text(row[1]?.value), '799', reason: header);
+      }
+    });
+
+    test('removes store brand, marketplace names and links from the text', () {
+      final file = File(
+        'meesho template file/'
+        'Tshirts-10000-EXTERNAL-MeeshoTemplate2PricesGSTIN.xlsx',
+      );
+      if (!file.existsSync()) return;
+      final product = ProductLinkData(
+        sourceUrl: 'https://www.flipkart.com/tripr-full-sleeve-solid-men-sweatshirt/p/itm1?pid=P',
+        siteName: 'Flipkart',
+        title:
+            'TRIPR Full Sleeve Solid Men Sweatshirt - Buy TRIPR Full Sleeve '
+            'Solid Men Sweatshirt Online at Best Prices in India',
+        description:
+            'Buy TRIPR Full Sleeve Solid Men Sweatshirt for ₹466 online. '
+            'Soft cotton sweatshirt for daily wear. Free Shipping. '
+            'Cash on Delivery! Only on Flipkart.com',
+        price: '₹466',
+        fetchedAt: DateTime(2026),
+      );
+      final template = service.analyze(
+        file.readAsBytesSync(),
+        fileName: 'tshirts.xlsx',
+        product: product,
+      );
+      final filled = service.fill(template, product);
+      final row = Excel.decodeBytes(filled)
+          .tables['Tshirts-Fill this']!
+          .rows[4];
+
+      expect(_text(row[3]?.value), 'Full Sleeve Solid Men Sweatshirt');
+      final description = _text(row[43]?.value);
+      expect(description, 'Soft cotton sweatshirt for daily wear.');
+      for (final cell in row) {
+        final text = _text(cell?.value).toLowerCase();
+        expect(text, isNot(contains('tripr')));
+        expect(text, isNot(contains('flipkart')));
+      }
+      expect(_text(row[5]?.value), '466');
+
+      // Formulas carry their computed result: Returns Price = price - 22.
+      final sheet = ZipDecoder()
+          .decodeBytes(filled)
+          .findFile('xl/worksheets/sheet5.xml')!;
+      final xml = utf8.decode(sheet.content as List<int>);
+      expect(xml, contains('F5-22,"")</f><v>444</v>'));
+    });
+
+    test('reports compulsory columns that would be left empty', () {
+      final file = File(
+        'meesho template file/'
+        'Tshirts-10000-EXTERNAL-MeeshoTemplate2PricesGSTIN.xlsx',
+      );
+      if (!file.existsSync()) return;
+      final product = _product();
+      final template = service.analyze(
+        file.readAsBytesSync(),
+        fileName: 'tshirts.xlsx',
+        product: product,
+      );
+
+      final missing = service.missingRequired(template, product);
+      expect(missing, containsAll(['GST %', 'HSN ID', 'Fit/Shape']));
+      // Filled from the product or defaults, or computed by the template.
+      expect(missing, isNot(contains('Product Name')));
+      expect(missing, isNot(contains('Fabric')));
+      expect(missing, isNot(contains('Inventory')));
+      expect(missing, isNot(contains('Importer Name')));
+      // Optional columns never block.
+      expect(missing, isNot(contains('Image 2')));
+      expect(missing, isNot(contains('Wrong/Defective Returns Price')));
+
+      final edits = {
+        for (final column in template.columns)
+          if (missing.contains(column.header)) column.columnIndex: 'x',
+      };
+      expect(service.missingRequired(template, product, edits: edits), isEmpty);
+    });
+
+    test('fills default inventory, weight and package size', () {
+      final excel = Excel.createExcel();
+      excel['Sheet1'].appendRow([
+        TextCellValue('Product Name'),
+        TextCellValue('Inventory'),
+        TextCellValue('Weight (gms)'),
+        TextCellValue('Package Length (cm)'),
+        TextCellValue('Package Breadth (cm)'),
+        TextCellValue('Package Height (cm)'),
+      ]);
+      final template = service.analyze(
+        Uint8List.fromList(excel.encode()!),
+        fileName: 'template.xlsx',
+        product: _product(),
+      );
+      final row = Excel.decodeBytes(service.fill(template, _product()))
+          .tables['Sheet1']!
+          .rows[1];
+      expect(
+        [for (var i = 1; i <= 5; i++) _text(row[i]?.value)],
+        ['10', '200', '10', '10', '10'],
+      );
     });
 
     test('rejects a workbook without Meesho headers', () {
@@ -177,8 +516,8 @@ void main() {
       expect(_text(row[1]?.value), '799');
       expect(_text(row[2]?.value), '999');
       expect(_text(row[3]?.value), '20');
-      expect(_text(row[4]?.value), 'https://cdn.example.com/1.jpg');
-      expect(_text(row[5]?.value), 'https://cdn.example.com/2.jpg');
+      expect(_text(row[4]?.value), '');
+      expect(_text(row[5]?.value), '');
     });
   });
 }

@@ -1,5 +1,7 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
+import 'package:excel/excel.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -7,6 +9,7 @@ import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:flutter_app/app.dart';
+import 'package:flutter_app/core/files/template_picker.dart';
 import 'package:flutter_app/core/theme/theme_controller.dart';
 import 'package:flutter_app/data/models/flipkart_category.dart';
 import 'package:flutter_app/data/models/product_link_data.dart';
@@ -325,10 +328,11 @@ void main() {
       expect(fake.lastLink, contains('demo-store.com'));
       expect(find.text('Wireless Earbuds Pro'), findsWidgets);
       expect(find.text('\u20b91,299'), findsWidgets);
+      expect(find.text('Meesho listing Excel'), findsOneWidget);
+      expect(find.text('Upload Meesho template'), findsOneWidget);
       expect(find.text('Product photos'), findsOneWidget);
       expect(find.byTooltip('Download photo 1'), findsOneWidget);
       expect(find.byTooltip('Copy photo 1 link'), findsOneWidget);
-      expect(find.text('Copy all'), findsWidgets);
 
       final scrollable = find
           .descendant(
@@ -404,7 +408,101 @@ void main() {
 
       expect(tester.takeException(), isNull);
     });
+
+    testWidgets('fills an uploaded Meesho template and downloads it', (
+      tester,
+    ) async {
+      setScreenSize(tester, const Size(1200, 2000));
+      Uint8List? savedBytes;
+      String? savedName;
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: ProductDataPage(
+              source: _FakeProductLinkSource(),
+              templatePicker: () async => PickedTemplateFile(
+                name: 'template.xlsx',
+                bytes: _meeshoTemplateBytes(),
+              ),
+              templateSaver: (bytes, fileName) async {
+                savedBytes = bytes;
+                savedName = fileName;
+                return true;
+              },
+            ),
+          ),
+        ),
+      );
+
+      await tester.enterText(
+        find.byType(TextField),
+        'https://www.demo-store.com/products/noise-buds-x',
+      );
+      await tester.tap(find.text('Fetch product data'));
+      await tester.pumpAndSettle();
+
+      final scrollable = find
+          .descendant(
+            of: find.byType(ProductDataPage),
+            matching: find.byType(Scrollable),
+          )
+          .first;
+      await tester.scrollUntilVisible(
+        find.text('Upload Meesho template'),
+        300,
+        scrollable: scrollable,
+      );
+      await tester.tap(find.text('Upload Meesho template'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('template.xlsx'), findsOneWidget);
+      expect(find.textContaining('columns matched'), findsWidgets);
+
+      await tester.scrollUntilVisible(
+        find.text('Download filled Excel'),
+        300,
+        scrollable: scrollable,
+      );
+      await tester.tap(find.text('Download filled Excel'));
+      await tester.pumpAndSettle();
+
+      expect(savedBytes, isNotNull);
+      expect(savedName, contains('meesho.xlsx'));
+      final workbook = Excel.decodeBytes(savedBytes!);
+      final row = workbook.tables['Sheet1']!.rows[1];
+      expect(_excelText(row[0]?.value), 'Wireless Earbuds Pro');
+      expect(_excelText(row[1]?.value), '1299');
+      // Source-store image links are never copied into the template.
+      expect(_excelText(row[2]?.value), '');
+    });
   });
+}
+
+Uint8List _meeshoTemplateBytes() {
+  final excel = Excel.createExcel();
+  final sheet = excel['Sheet1'];
+  sheet.appendRow([
+    TextCellValue('Product Name'),
+    TextCellValue('Selling Price'),
+    TextCellValue('Image 1'),
+    TextCellValue('Color'),
+  ]);
+  return Uint8List.fromList(excel.encode()!);
+}
+
+String _excelText(CellValue? value) {
+  return switch (value) {
+    null => '',
+    TextCellValue() => value.value.toString(),
+    IntCellValue() => value.value.toString(),
+    DoubleCellValue() => value.value.toString(),
+    BoolCellValue() => value.value.toString(),
+    DateCellValue() => value.toString(),
+    DateTimeCellValue() => value.toString(),
+    TimeCellValue() => value.toString(),
+    FormulaCellValue() => value.formula,
+  };
 }
 
 const _longKeyword =

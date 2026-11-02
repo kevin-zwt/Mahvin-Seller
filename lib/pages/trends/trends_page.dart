@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../common/widgets/adaptive_grid.dart';
@@ -755,10 +756,49 @@ class _SuggestionCard extends StatelessWidget {
                   ),
                 ),
               ),
+              MouseRegion(
+                cursor: SystemMouseCursors.click,
+                child: InkWell(
+                  onTap: () => _copyProductLink(context, suggestion.url),
+                  borderRadius: BorderRadius.circular(AppDimens.radiusPill),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: AppDimens.sm,
+                      vertical: 4,
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          'Copy link',
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: scheme.primary,
+                            fontWeight: FontWeight.w700,
+                            fontSize: 11.5,
+                          ),
+                        ),
+                        const SizedBox(width: 3),
+                        Icon(Icons.copy, size: 13, color: scheme.primary),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
             ],
           ),
         ],
       ),
+    );
+  }
+}
+
+Future<void> _copyProductLink(BuildContext context, String url) async {
+  final trimmed = url.trim();
+  if (trimmed.isEmpty) return;
+  await Clipboard.setData(ClipboardData(text: trimmed));
+  if (context.mounted) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Product link copied.')),
     );
   }
 }

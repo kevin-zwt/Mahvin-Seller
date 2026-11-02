@@ -34,6 +34,8 @@ saved state is the optional Serper API key and the theme preference.
 - Extracts the product title, description, brand, price, MRP, discount, rating, review count, availability, seller, category, SKU, key features, keywords, photos, and specifications.
 - Shows product photos in a grid with per-photo download, per-photo link copy, and download-all actions.
 - Shows every listing field separately with its own copy button, plus a copy-all summary.
+- Uploads a Meesho `.xlsx` listing template, fills its product-specific columns from the fetched product, and downloads the filled file for direct upload.
+- Lets the seller edit matched fields and fill unmatched template columns before downloading the Excel.
 - Copies a listing-ready summary to the clipboard and opens the original product page.
 - Uses the public reader first and falls back to the saved Serper key when a store blocks the reader.
 - Searches web articles and seller growth playbooks for topics like ad campaigns (PLA), listing SEO, pricing strategies, reducing returns (RTO), Flipkart Assured, and review management.
@@ -150,6 +152,30 @@ bullets, tables, and price/rating lines.
 Photo downloads use the browser's Blob download support. If a browser blocks
 the download, the app opens the photo in a new tab instead.
 
+## How Meesho Excel templates are filled
+
+After a product is fetched, upload the `.xlsx` template downloaded from Meesho.
+The app scans the workbook for the header row, skips reference sheets such as
+validation/example tabs, and maps columns by their names (product name, price,
+MRP, brand, specs such as Color, Image 1, Image 2, and so on).
+
+- One product is written to the first data row after the header, skipping an
+  example/sample row when present.
+- Matched values can be edited before download; unmatched template columns are
+  listed in an expandable section so required fields such as HSN or GST can be
+  added.
+- Numeric columns are written as numbers, while codes such as HSN stay text.
+- Meesho Price uses the scraped price; MRP is set to price + ₹200 so the strike
+  price stays valid, using the scraped MRP only when the price is unavailable.
+- Image columns receive the extracted image URLs.
+- Existing formulas are kept unless the seller edits that cell.
+- Other worksheets, styles, merged cells, formulas, and template parts are
+  written back unchanged. Only the data row and shared-string table change.
+
+Download the filled file, then upload it directly to Meesho. If a required
+Meesho field is not present on the source product, fill it in the app or in
+Excel before uploading.
+
 ## Limits
 
 - Flipkart can change its page layout or temporarily block scraping. When that
@@ -175,6 +201,11 @@ the download, the app opens the photo in a new tab instead.
 - An internet connection is required. A Serper key is optional.
 - Product data is copied from the public page and can be incomplete when a
   store hides details behind JavaScript, a login, or a captcha.
+- Meesho templates change by category. The app detects common headers, but
+  category-specific required fields or dropdown values may still need manual
+  edits before Meesho accepts the file.
+- Only one product is filled per template download. Use a separate template
+  upload for each listing.
 - Product links open in the device's external browser or product app.
 
 ## Project structure
@@ -194,8 +225,10 @@ lib/
     sourcing_service.dart    # IndiaMART/TradeIndia reader, parsing, Serper fallback
     growth_strategy_service.dart # web search & curated growth strategy service
     product_link_service.dart   # HTML/markdown product parsing + Serper fallback
+    meesho_template_service.dart # Meesho .xlsx header mapping + row filling
   common/                    # shared cards, buttons, layout helpers
-  core/download/             # browser image download and non-web fallback
+  core/download/             # browser image/file download and non-web fallback
+  core/files/                # browser .xlsx template picker
   pages/
     splash/
     shell/                   # app bar & bottom navigation shell
@@ -207,6 +240,7 @@ test/
   trend_service_test.dart    # reader/Serper parsing, fallback, errors
   sourcing_test.dart         # portal parsing, contacts, platform filter, sourcing UI
   product_link_test.dart     # product parsing, blocked pages, Serper fallback, UI
+  meesho_template_test.dart  # header detection, real template, edit/clear, XML preservation
   widget_test.dart           # search, category cache, and error flows
   growth_strategy_test.dart  # web strategy search & UI navigation tests
 ```

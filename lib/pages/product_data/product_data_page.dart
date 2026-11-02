@@ -48,6 +48,7 @@ class _ProductDataPageState extends State<ProductDataPage> {
 
   MeeshoTemplate? _template;
   Map<int, String> _templateEdits = {};
+  bool _showTemplateErrors = false;
   bool _templateLoading = false;
   bool _templateSaving = false;
   String? _templateError;
@@ -75,6 +76,7 @@ class _ProductDataPageState extends State<ProductDataPage> {
       _data = null;
       _template = null;
       _templateEdits = {};
+      _showTemplateErrors = false;
       _templateError = null;
       _templateLoading = false;
       _templateSaving = false;
@@ -113,6 +115,7 @@ class _ProductDataPageState extends State<ProductDataPage> {
       _loading = false;
       _template = null;
       _templateEdits = {};
+      _showTemplateErrors = false;
       _templateError = null;
       _templateLoading = false;
       _templateSaving = false;
@@ -179,7 +182,7 @@ class _ProductDataPageState extends State<ProductDataPage> {
 
   Future<void> _chooseTemplate() async {
     final data = _data;
-    if (data == null || _templateLoading) return;
+    if (data == null || _templateLoading || _templateSaving) return;
     setState(() {
       _templateLoading = true;
       _templateError = null;
@@ -200,6 +203,7 @@ class _ProductDataPageState extends State<ProductDataPage> {
       setState(() {
         _template = template;
         _templateEdits = {};
+        _showTemplateErrors = false;
         _templateLoading = false;
       });
       _showMessage(
@@ -227,6 +231,21 @@ class _ProductDataPageState extends State<ProductDataPage> {
     final template = _template;
     final data = _data;
     if (template == null || data == null || _templateSaving) return;
+    final missing = widget.templateService.missingRequired(
+      template,
+      data,
+      edits: _templateEdits,
+    );
+    if (missing.isNotEmpty) {
+      setState(() {
+        _showTemplateErrors = true;
+        _templateError =
+            'Fill the required fields before downloading: '
+            '${missing.take(6).join(', ')}'
+            '${missing.length > 6 ? ' and ${missing.length - 6} more' : ''}.';
+      });
+      return;
+    }
     setState(() {
       _templateSaving = true;
       _templateError = null;
@@ -434,6 +453,7 @@ class _ProductDataPageState extends State<ProductDataPage> {
           const SizedBox(height: AppDimens.lg),
           _MeeshoTemplateCard(
             template: _template,
+            showErrors: _showTemplateErrors,
             defaults: _template == null
                 ? const {}
                 : widget.templateService.defaultValues(_template!, data),
@@ -885,6 +905,7 @@ class _MeeshoTemplateCard extends StatelessWidget {
     required this.template,
     required this.defaults,
     required this.onEdit,
+    required this.showErrors,
     required this.loading,
     required this.saving,
     required this.error,
@@ -895,6 +916,7 @@ class _MeeshoTemplateCard extends StatelessWidget {
   final MeeshoTemplate? template;
   final Map<int, String> defaults;
   final void Function(int columnIndex, String value) onEdit;
+  final bool showErrors;
   final bool loading;
   final bool saving;
   final String? error;
@@ -1048,6 +1070,7 @@ class _MeeshoTemplateCard extends StatelessWidget {
               columns: current.columns,
               defaults: defaults,
               onEdit: onEdit,
+              showErrors: showErrors,
             ),
             const SizedBox(height: AppDimens.lg),
             Wrap(
@@ -1082,11 +1105,13 @@ class _TemplateFieldsEditor extends StatefulWidget {
     required this.columns,
     required this.defaults,
     required this.onEdit,
+    required this.showErrors,
   });
 
   final List<MeeshoTemplateColumn> columns;
   final Map<int, String> defaults;
   final void Function(int columnIndex, String value) onEdit;
+  final bool showErrors;
 
   @override
   State<_TemplateFieldsEditor> createState() => _TemplateFieldsEditorState();
@@ -1105,10 +1130,117 @@ class _TemplateFieldsEditorState extends State<_TemplateFieldsEditor> {
     for (final controller in _controllers.values) {
       controller.dispose();
     }
+    for (final node in _focusNodes.values) {
+      node.dispose();
+    }
     super.dispose();
   }
 
-  Widget _field(MeeshoTemplateColumn column) {
+  final Map<int, FocusNode> _focusNodes = {};
+
+  Widget _field(MeeshoTemplateColumn column) =>
+      column.options.isEmpty ? _textField(column) : _choiceField(column);
+
+  /// A searchable dropdown limited to the template's own choices.
+  Widget _choiceField(MeeshoTemplateColumn column) {
+    final controller = _controllers[column.columnIndex]!;
+    final focusNode = _focusNodes.putIfAbsent(
+      column.columnIndex,
+      () => FocusNode(),
+    );
+    final text = controller.text.trim();
+    final invalid = text.isNotEmpty && column.matchOption(text) == null;
+    final missing =
+        widget.showErrors &&
+        column.required &&
+        !column.prefilled &&
+        text.isEmpty;
+
+    void apply(String value) {
+      widget.onEdit(column.columnIndex, column.matchOption(value) ?? '');
+      setState(() {});
+    }
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: AppDimens.md),
+      child: LayoutBuilder(
+        builder: (context, constraints) => RawAutocomplete<String>(
+          textEditingController: controller,
+          focusNode: focusNode,
+          optionsBuilder: (value) {
+            final query = value.text.trim().toLowerCase();
+            if (query.isEmpty || column.matchOption(value.text) != null) {
+              return column.options;
+            }
+            return column.options.where(
+              (option) => option.toLowerCase().contains(query),
+            );
+          },
+          onSelected: apply,
+          fieldViewBuilder: (context, textController, node, onSubmitted) {
+            return TextField(
+              controller: textController,
+              focusNode: node,
+              onChanged: apply,
+              decoration: InputDecoration(
+                labelText: column.required
+                    ? '${column.header} *'
+                    : column.header,
+                errorText: missing
+                    ? 'Required'
+                    : invalid
+                    ? 'Choose a value from the list'
+                    : null,
+                isDense: true,
+                border: const OutlineInputBorder(),
+                suffixIcon: IconButton(
+                  tooltip: 'Show options',
+                  icon: const Icon(Icons.arrow_drop_down),
+                  onPressed: () {
+                    if (node.hasFocus) node.unfocus();
+                    node.requestFocus();
+                  },
+                ),
+              ),
+            );
+          },
+          optionsViewBuilder: (context, onSelected, options) {
+            final list = options.toList(growable: false);
+            return Align(
+              alignment: Alignment.topLeft,
+              child: Material(
+                elevation: 4,
+                borderRadius: BorderRadius.circular(AppDimens.radiusSm),
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxHeight: 240,
+                    maxWidth: constraints.maxWidth,
+                  ),
+                  child: list.isEmpty
+                      ? const Padding(
+                          padding: EdgeInsets.all(AppDimens.md),
+                          child: Text('No matching option'),
+                        )
+                      : ListView.builder(
+                          padding: EdgeInsets.zero,
+                          shrinkWrap: true,
+                          itemCount: list.length,
+                          itemBuilder: (context, index) => ListTile(
+                            dense: true,
+                            title: Text(list[index]),
+                            onTap: () => onSelected(list[index]),
+                          ),
+                        ),
+                ),
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  Widget _textField(MeeshoTemplateColumn column) {
     final controller = _controllers[column.columnIndex]!;
     return Padding(
       padding: const EdgeInsets.only(bottom: AppDimens.md),
@@ -1116,9 +1248,19 @@ class _TemplateFieldsEditorState extends State<_TemplateFieldsEditor> {
         controller: controller,
         minLines: 1,
         maxLines: 4,
-        onChanged: (value) => widget.onEdit(column.columnIndex, value),
+        onChanged: (value) {
+          widget.onEdit(column.columnIndex, value);
+          setState(() {});
+        },
         decoration: InputDecoration(
-          labelText: column.header,
+          labelText: column.required ? '${column.header} *' : column.header,
+          errorText:
+              widget.showErrors &&
+                  column.required &&
+                  !column.prefilled &&
+                  controller.text.trim().isEmpty
+              ? 'Required'
+              : null,
           isDense: true,
           border: const OutlineInputBorder(),
           suffixIcon: IconButton(
@@ -1137,17 +1279,25 @@ class _TemplateFieldsEditorState extends State<_TemplateFieldsEditor> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final mapped = widget.columns.where((c) => c.isMapped).toList();
-    final others = widget.columns.where((c) => !c.isMapped).toList();
+    final editable = widget.columns.where((c) => c.editable);
+    final mapped = editable.where((c) => c.required && !c.prefilled).toList();
+    final others = editable
+        .where((c) => !(c.required && !c.prefilled))
+        .toList();
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         if (mapped.isNotEmpty) ...[
           Text(
-            'Matched fields (${mapped.length})',
+            'Required fields (${mapped.length})',
             style: theme.textTheme.labelLarge?.copyWith(
               fontWeight: FontWeight.w700,
             ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            'All of these must be filled before you can download.',
+            style: theme.textTheme.bodySmall,
           ),
           const SizedBox(height: AppDimens.sm),
           for (final column in mapped) _field(column),
@@ -1159,12 +1309,12 @@ class _TemplateFieldsEditorState extends State<_TemplateFieldsEditor> {
               tilePadding: EdgeInsets.zero,
               childrenPadding: const EdgeInsets.only(top: AppDimens.sm),
               title: Text(
-                'Other template columns (${others.length})',
+                'Optional fields (${others.length})',
                 style: theme.textTheme.labelLarge?.copyWith(
                   fontWeight: FontWeight.w700,
                 ),
               ),
-              subtitle: const Text('Not found on the product. Fill if needed.'),
+              subtitle: const Text('Not required. Edit or fill if needed.'),
               children: [for (final column in others) _field(column)],
             ),
           ),
