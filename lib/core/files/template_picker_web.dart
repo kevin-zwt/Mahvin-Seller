@@ -15,7 +15,9 @@ Future<PickedTemplateFile?> pickExcelTemplate() {
   final completer = Completer<PickedTemplateFile?>();
   final input = web.HTMLInputElement()
     ..type = 'file'
-    ..accept = '.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    ..accept =
+        '.xlsx,.xls,application/vnd.ms-excel,'
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
     ..style.display = 'none';
 
   var finished = false;

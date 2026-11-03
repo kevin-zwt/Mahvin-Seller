@@ -13,6 +13,7 @@ import '../../core/download/image_downloader.dart';
 import '../../core/files/template_picker.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_dimens.dart';
+import '../../data/flipkart_template_service.dart';
 import '../../data/meesho_template_service.dart';
 import '../../data/models/product_link_data.dart';
 import '../../data/product_link_service.dart';
@@ -29,6 +30,7 @@ class ProductDataPage extends StatefulWidget {
     this.templatePicker,
     this.templateSaver,
     this.templateService = const MeeshoTemplateService(),
+    this.flipkartService = const FlipkartTemplateService(),
     this.seoService,
   });
 
@@ -39,6 +41,7 @@ class ProductDataPage extends StatefulWidget {
   final TemplatePicker? templatePicker;
   final TemplateSaver? templateSaver;
   final MeeshoTemplateService templateService;
+  final FlipkartTemplateService flipkartService;
 
   @override
   State<ProductDataPage> createState() => _ProductDataPageState();
@@ -58,6 +61,13 @@ class _ProductDataPageState extends State<ProductDataPage> {
   bool _templateLoading = false;
   bool _templateSaving = false;
   String? _templateError;
+
+  MeeshoTemplate? _fkTemplate;
+  Map<int, String> _fkEdits = {};
+  bool _fkShowErrors = false;
+  bool _fkLoading = false;
+  bool _fkSaving = false;
+  String? _fkError;
 
   SeoService? _seo;
 
@@ -147,6 +157,12 @@ class _ProductDataPageState extends State<ProductDataPage> {
       _templateError = null;
       _templateLoading = false;
       _templateSaving = false;
+      _fkTemplate = null;
+      _fkEdits = {};
+      _fkShowErrors = false;
+      _fkError = null;
+      _fkLoading = false;
+      _fkSaving = false;
     });
 
     try {
@@ -186,6 +202,12 @@ class _ProductDataPageState extends State<ProductDataPage> {
       _templateError = null;
       _templateLoading = false;
       _templateSaving = false;
+      _fkTemplate = null;
+      _fkEdits = {};
+      _fkShowErrors = false;
+      _fkError = null;
+      _fkLoading = false;
+      _fkSaving = false;
     });
   }
 
@@ -348,27 +370,143 @@ class _ProductDataPageState extends State<ProductDataPage> {
     }
   }
 
+  Future<void> _chooseFlipkart() async {
+    final data = _data;
+    if (data == null || _fkLoading || _fkSaving) return;
+    setState(() {
+      _fkLoading = true;
+      _fkError = null;
+    });
+    try {
+      final picked = await (widget.templatePicker ?? pickExcelTemplate)();
+      if (!mounted) return;
+      if (picked == null) {
+        setState(() => _fkLoading = false);
+        return;
+      }
+      final template = widget.flipkartService.analyze(
+        picked.bytes,
+        fileName: picked.name,
+        product: data,
+      );
+      if (!mounted) return;
+      setState(() {
+        _fkTemplate = template;
+        _fkEdits = {};
+        _fkShowErrors = false;
+        _fkLoading = false;
+      });
+      _showMessage(
+        'Flipkart template ready: ${template.mappedColumnCount} '
+        'column${template.mappedColumnCount == 1 ? '' : 's'} matched.',
+      );
+    } on MeeshoTemplateException catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _fkError = error.message;
+        _fkLoading = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _fkError =
+            'Could not read that template. Upload the original Flipkart '
+            '.xls or .xlsx file.';
+        _fkLoading = false;
+      });
+    }
+  }
+
+  Future<void> _downloadFlipkart() async {
+    final template = _fkTemplate;
+    final data = _data;
+    if (template == null || data == null || _fkSaving) return;
+    final missing = widget.flipkartService.missingRequired(
+      template,
+      data,
+      edits: _fkEdits,
+    );
+    if (missing.isNotEmpty) {
+      setState(() {
+        _fkShowErrors = true;
+        _fkError =
+            'Fill the required fields before downloading: '
+            '${missing.take(6).join(', ')}.';
+      });
+      return;
+    }
+    setState(() {
+      _fkSaving = true;
+      _fkError = null;
+    });
+    try {
+      final bytes = widget.flipkartService.fill(
+        template,
+        data,
+        edits: _fkEdits,
+      );
+      final fileName = widget.flipkartService.keepsFileName(template)
+          ? template.fileName
+          : _filledTemplateName(
+              data.title,
+              template.fileName,
+              marketplace: 'flipkart',
+            );
+      final saved = await (widget.templateSaver ?? _saveExcel)(bytes, fileName);
+      if (!mounted) return;
+      setState(() => _fkSaving = false);
+      _showMessage(
+        saved
+            ? 'Filled Flipkart Excel saved as $fileName.'
+            : 'Not saved. The save was cancelled or is unavailable here.',
+      );
+    } on MeeshoTemplateException catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _fkError = error.message;
+        _fkSaving = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _fkError =
+            'Could not build the Excel file. Check the template and try again.';
+        _fkSaving = false;
+      });
+    }
+  }
+
   Future<bool> _saveExcel(Uint8List bytes, String fileName) {
-    return downloadBytes(
+    // A Flipkart .xls must keep its exact name, so it is saved through the
+    // save dialog where the existing file can be replaced.
+    final isXls = fileName.toLowerCase().endsWith('.xls');
+    final save = isXls ? saveFileReplacing : downloadBytes;
+    return save(
       bytes,
       fileName,
-      mimeType:
-          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      mimeType: isXls
+          ? 'application/vnd.ms-excel'
+          : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     );
   }
 
-  String _filledTemplateName(String title, String templateName) {
-    final fallback = templateName.toLowerCase().endsWith('.xlsx')
-        ? templateName.substring(0, templateName.length - 5)
-        : templateName;
+  String _filledTemplateName(
+    String title,
+    String templateName, {
+    String marketplace = 'meesho',
+  }) {
+    final fallback = templateName.replaceFirst(
+      RegExp(r'\.xlsx?$', caseSensitive: false),
+      '',
+    );
     final raw = title.trim().isNotEmpty ? title : fallback;
     var base = raw
         .replaceAll(RegExp(r'[<>:"/\\|?*]+'), ' ')
         .trim()
         .replaceAll(RegExp(r'\s+'), '_');
     if (base.length > 60) base = base.substring(0, 60);
-    if (base.isEmpty) base = 'Meesho_listing';
-    return '${base}_meesho.xlsx';
+    if (base.isEmpty) base = '${marketplace}_listing';
+    return '${base}_$marketplace.xlsx';
   }
 
   Future<void> _copyValue(String label, String value) async {
@@ -549,6 +687,34 @@ class _ProductDataPageState extends State<ProductDataPage> {
             error: _templateError,
             onPick: _chooseTemplate,
             onDownload: _downloadTemplate,
+          ),
+          const SizedBox(height: AppDimens.lg),
+          _MeeshoTemplateCard(
+            marketplace: 'Flipkart',
+            fileHint: '.xls or .xlsx',
+            template: _fkTemplate,
+            showErrors: _fkShowErrors,
+            calculated: () => const [],
+            onGenerate: null,
+            defaults: _fkTemplate == null
+                ? const {}
+                : widget.flipkartService.defaultValues(_fkTemplate!, data),
+            onEdit: (columnIndex, value) {
+              final defaults = widget.flipkartService.defaultValues(
+                _fkTemplate!,
+                data,
+              );
+              if (value == (defaults[columnIndex] ?? '')) {
+                _fkEdits.remove(columnIndex);
+              } else {
+                _fkEdits[columnIndex] = value;
+              }
+            },
+            loading: _fkLoading,
+            saving: _fkSaving,
+            error: _fkError,
+            onPick: _chooseFlipkart,
+            onDownload: _downloadFlipkart,
           ),
           if (data.photos.isNotEmpty) ...[
             const SizedBox(height: AppDimens.xl),
@@ -977,6 +1143,8 @@ class _ErrorCard extends StatelessWidget {
 
 class _MeeshoTemplateCard extends StatelessWidget {
   const _MeeshoTemplateCard({
+    this.marketplace = 'Meesho',
+    this.fileHint = '.xlsx',
     required this.template,
     required this.defaults,
     required this.onEdit,
@@ -990,6 +1158,8 @@ class _MeeshoTemplateCard extends StatelessWidget {
     required this.onDownload,
   });
 
+  final String marketplace;
+  final String fileHint;
   final MeeshoTemplate? template;
   final Map<int, String> defaults;
   final void Function(int columnIndex, String value) onEdit;
@@ -1037,13 +1207,14 @@ class _MeeshoTemplateCard extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Meesho listing Excel',
+                      '$marketplace listing Excel',
                       style: theme.textTheme.titleMedium,
                     ),
                     const SizedBox(height: AppDimens.xs),
                     Text(
-                      'Upload your Meesho template. This product will be '
-                      'filled into it and downloaded as an .xlsx file.',
+                      'Upload your $marketplace template ($fileHint). This '
+                      'product will be filled into it and downloaded as an '
+                      '.xlsx file.',
                       style: theme.textTheme.bodyMedium,
                     ),
                   ],
@@ -1081,14 +1252,16 @@ class _MeeshoTemplateCard extends StatelessWidget {
           if (current == null) ...[
             const SizedBox(height: AppDimens.lg),
             AppButton(
-              label: loading ? 'Reading template...' : 'Upload Meesho template',
+              label: loading
+                  ? 'Reading template...'
+                  : 'Upload $marketplace template',
               icon: Icons.upload_file_outlined,
               variant: AppButtonVariant.outline,
               onPressed: loading ? null : onPick,
             ),
             const SizedBox(height: AppDimens.sm),
             Text(
-              'Use the original template downloaded from Meesho. The header '
+              'Use the original template downloaded from $marketplace. The header '
               'row and product-specific columns are detected automatically.',
               style: theme.textTheme.bodySmall,
             ),
