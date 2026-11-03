@@ -165,7 +165,7 @@ MRP, brand, specs such as Color, Image 1, Image 2, and so on).
   listed in an expandable section so required fields such as HSN or GST can be
   added.
 - Numeric columns are written as numbers, while codes such as HSN stay text.
-- Meesho Price uses the scraped price; MRP is set to price + ₹200 so the strike
+- Meesho Price uses the scraped price; MRP is set so the price is 60% off it, so the strike
   price stays valid, using the scraped MRP only when the price is unavailable.
 - Image columns receive the extracted image URLs.
 - Existing formulas are kept unless the seller edits that cell.

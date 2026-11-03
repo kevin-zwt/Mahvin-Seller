@@ -46,7 +46,7 @@ void main() {
       expect(_text(row[0]?.value), 'Cotton Kurti');
       // The source store's brand is never copied into the listing.
       expect(_text(row[2]?.value), '');
-      expect(_text(row[3]?.value), '999');
+      expect(_text(row[3]?.value), '1998');
       expect(_text(row[4]?.value), '799');
       expect(_text(row[5]?.value), 'Blue');
       expect(_text(row[6]?.value), '');
@@ -93,6 +93,22 @@ void main() {
 
       expect(byHeader['Generic Name'], isNull);
       expect(byHeader['Wrong/Defective Returns Price'], isNull);
+      // The auto-calculated returns price is not offered for editing.
+      final returns = template.columns.firstWhere(
+        (c) => c.header == 'Wrong/Defective Returns Price',
+      );
+      expect(returns.editable, isFalse);
+      // It is shown read-only in the app, recalculated from the price.
+      final calculated = service.calculatedFields(template, product);
+      expect(calculated.single.header, 'Wrong/Defective Returns Price');
+      expect(calculated.single.value, '777');
+      expect(
+        service
+            .calculatedFields(template, product, edits: {5: '1000'})
+            .single
+            .value,
+        '978',
+      );
 
       final filled = service.fill(template, product);
       final row = Excel.decodeBytes(filled)
@@ -100,7 +116,7 @@ void main() {
           .rows[4];
       expect(_text(row[3]?.value), 'Cotton Kurti');
       expect(_text(row[5]?.value), '799');
-      expect(_text(row[7]?.value), '999');
+      expect(_text(row[7]?.value), '1998');
       expect(_text(row[22]?.value), 'Blue');
       expect(_text(row[35]?.value), '');
       expect(_text(row[13]?.value), 'Mahvin Enterprise');
@@ -290,6 +306,9 @@ void main() {
         };
         expect(byHeader['Enter Meesho Price'], 'price', reason: '$layout');
         expect(byHeader['Customer Price'], isNull, reason: '$layout');
+        final shown = service.calculatedFields(template, _product());
+        expect(shown.single.header, 'Customer Price', reason: '$layout');
+        expect(shown.single.value, customer == 2 ? '777' : '821');
 
         final filled = service.fill(template, _product());
         final xml = utf8.decode(
@@ -311,6 +330,54 @@ void main() {
           reason: '$layout $xml',
         );
       }
+    });
+
+    test('recalculates a formula that ships with a stale cached 0', () {
+      final excel = Excel.createExcel();
+      final sheet = excel['Sheet1'];
+      sheet.appendRow([
+        TextCellValue('Product Name'),
+        TextCellValue('Meesho Price'),
+        TextCellValue('Wrong/Defective Returns Price'),
+      ]);
+      sheet.appendRow([
+        TextCellValue(''),
+        TextCellValue(''),
+        FormulaCellValue('IF(B2>12,B2-12,"")'),
+      ]);
+      // Excel can leave a cached 0 and attributes on the formula tag.
+      final archive = ZipDecoder().decodeBytes(excel.encode()!);
+      final output = Archive();
+      for (final file in archive.files) {
+        var bytes = file.content as List<int>;
+        if (file.name == 'xl/worksheets/sheet1.xml') {
+          bytes = utf8.encode(
+            utf8
+                .decode(bytes)
+                .replaceAll('<f>', '<f aca="false">')
+                .replaceAll('<v></v>', '<v>0</v>'),
+          );
+        }
+        output.addFile(ArchiveFile(file.name, bytes.length, bytes));
+      }
+      final template = service.analyze(
+        Uint8List.fromList(ZipEncoder().encode(output)!),
+        fileName: 'template.xlsx',
+        product: _product(),
+      );
+      final filled = service.fill(template, _product());
+      final xml = utf8.decode(
+        ZipDecoder()
+                .decodeBytes(filled)
+                .findFile('xl/worksheets/sheet1.xml')!
+                .content
+            as List<int>,
+      );
+      expect(
+        RegExp('<c r="C2"[^>]*><f[^>]*>[^<]*</f><v>787</v></c>').hasMatch(xml),
+        isTrue,
+        reason: xml,
+      );
     });
 
     test('replaces hint text such as "Enter Meesho Price" in the data row', () {
@@ -514,8 +581,8 @@ void main() {
 
       expect(_text(row[0]?.value), 'Cotton Kurti');
       expect(_text(row[1]?.value), '799');
-      expect(_text(row[2]?.value), '999');
-      expect(_text(row[3]?.value), '20');
+      expect(_text(row[2]?.value), '1998');
+      expect(_text(row[3]?.value), '60');
       expect(_text(row[4]?.value), '');
       expect(_text(row[5]?.value), '');
     });

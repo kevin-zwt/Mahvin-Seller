@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../common/widgets/adaptive_grid.dart';
@@ -15,6 +16,7 @@ import '../../core/theme/app_dimens.dart';
 import '../../data/meesho_template_service.dart';
 import '../../data/models/product_link_data.dart';
 import '../../data/product_link_service.dart';
+import '../../data/seo_service.dart';
 
 typedef TemplatePicker = Future<PickedTemplateFile?> Function();
 typedef TemplateSaver = Future<bool> Function(Uint8List bytes, String fileName);
@@ -27,8 +29,12 @@ class ProductDataPage extends StatefulWidget {
     this.templatePicker,
     this.templateSaver,
     this.templateService = const MeeshoTemplateService(),
+    this.seoService,
   });
 
+  /// Writes the SEO title and description; created from local preferences
+  /// when not given.
+  final SeoService? seoService;
   final ProductLinkSource source;
   final TemplatePicker? templatePicker;
   final TemplateSaver? templateSaver;
@@ -52,6 +58,67 @@ class _ProductDataPageState extends State<ProductDataPage> {
   bool _templateLoading = false;
   bool _templateSaving = false;
   String? _templateError;
+
+  SeoService? _seo;
+
+  @override
+  void initState() {
+    super.initState();
+    _seo = widget.seoService;
+    if (_seo == null) {
+      SharedPreferences.getInstance()
+          .then((prefs) {
+            if (mounted) setState(() => _seo = SeoService(prefs: prefs));
+          })
+          .catchError((_) {});
+    }
+  }
+
+  /// Writes SEO text for one template field (its title or description) with
+  /// Groq. [current] is what the field holds now; a regenerate asks for
+  /// something different. Returns null when nothing was written.
+  Future<String?> _generateSeo(
+    MeeshoTemplateColumn column,
+    String current,
+  ) async {
+    final seo = _seo;
+    final data = _data;
+    if (seo == null || data == null) return null;
+    if (!seo.isConfigured) {
+      final saved = await showDialog<bool>(
+        context: context,
+        builder: (_) => _GroqKeyDialog(service: seo),
+      );
+      if (saved != true || !mounted || !seo.isConfigured) return null;
+    }
+    final part = column.fieldKey == 'title'
+        ? SeoPart.title
+        : SeoPart.description;
+    final service = widget.templateService;
+    String clean(String text) => service.cleanText(data, text);
+    try {
+      final content = await seo.generate(
+        SeoInput(
+          title: clean(data.title),
+          description: clean(data.description),
+          features: clean(data.keyFeatures.join('\n')),
+          specs: clean(
+            data.specs.map((spec) => '${spec.label}: ${spec.value}').join('\n'),
+          ),
+          category: data.category,
+        ),
+        part: part,
+        previous: current,
+        scrub: clean,
+      );
+      return part == SeoPart.title ? content.title : content.description;
+    } on SeoException catch (error) {
+      if (mounted) _showMessage(error.message);
+    } catch (_) {
+      if (mounted) _showMessage('Could not write the SEO text. Try again.');
+    }
+    return null;
+  }
 
   @override
   void dispose() {
@@ -454,6 +521,13 @@ class _ProductDataPageState extends State<ProductDataPage> {
           _MeeshoTemplateCard(
             template: _template,
             showErrors: _showTemplateErrors,
+            calculated: () => _template == null
+                ? const []
+                : widget.templateService.calculatedFields(
+                    _template!,
+                    data,
+                    edits: _templateEdits,
+                  ),
             defaults: _template == null
                 ? const {}
                 : widget.templateService.defaultValues(_template!, data),
@@ -469,6 +543,7 @@ class _ProductDataPageState extends State<ProductDataPage> {
                 _templateEdits[columnIndex] = value;
               }
             },
+            onGenerate: _seo == null ? null : _generateSeo,
             loading: _templateLoading,
             saving: _templateSaving,
             error: _templateError,
@@ -906,6 +981,8 @@ class _MeeshoTemplateCard extends StatelessWidget {
     required this.defaults,
     required this.onEdit,
     required this.showErrors,
+    required this.calculated,
+    required this.onGenerate,
     required this.loading,
     required this.saving,
     required this.error,
@@ -917,6 +994,9 @@ class _MeeshoTemplateCard extends StatelessWidget {
   final Map<int, String> defaults;
   final void Function(int columnIndex, String value) onEdit;
   final bool showErrors;
+  final List<MeeshoCalculatedField> Function() calculated;
+  final Future<String?> Function(MeeshoTemplateColumn column, String current)?
+  onGenerate;
   final bool loading;
   final bool saving;
   final String? error;
@@ -1071,6 +1151,8 @@ class _MeeshoTemplateCard extends StatelessWidget {
               defaults: defaults,
               onEdit: onEdit,
               showErrors: showErrors,
+              calculated: calculated,
+              onGenerate: onGenerate,
             ),
             const SizedBox(height: AppDimens.lg),
             Wrap(
@@ -1106,12 +1188,17 @@ class _TemplateFieldsEditor extends StatefulWidget {
     required this.defaults,
     required this.onEdit,
     required this.showErrors,
+    required this.calculated,
+    this.onGenerate,
   });
 
   final List<MeeshoTemplateColumn> columns;
   final Map<int, String> defaults;
   final void Function(int columnIndex, String value) onEdit;
   final bool showErrors;
+  final List<MeeshoCalculatedField> Function() calculated;
+  final Future<String?> Function(MeeshoTemplateColumn column, String current)?
+  onGenerate;
 
   @override
   State<_TemplateFieldsEditor> createState() => _TemplateFieldsEditorState();
@@ -1263,18 +1350,81 @@ class _TemplateFieldsEditorState extends State<_TemplateFieldsEditor> {
               : null,
           isDense: true,
           border: const OutlineInputBorder(),
-          suffixIcon: IconButton(
-            tooltip: 'Reset to product value',
-            icon: const Icon(Icons.restart_alt, size: 18),
-            onPressed: () {
-              controller.text = widget.defaults[column.columnIndex] ?? '';
-              widget.onEdit(column.columnIndex, controller.text);
-            },
+          suffixIcon: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (_canGenerate(column))
+                _generating.contains(column.columnIndex)
+                    ? const Padding(
+                        padding: EdgeInsets.all(12),
+                        child: SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                      )
+                    : IconButton(
+                        tooltip: controller.text.trim().isEmpty
+                            ? 'Generate with AI'
+                            : 'Regenerate with AI',
+                        icon: const Icon(Icons.auto_awesome, size: 18),
+                        onPressed: () => _generate(column),
+                      ),
+              IconButton(
+                tooltip: 'Reset to product value',
+                icon: const Icon(Icons.restart_alt, size: 18),
+                onPressed: () {
+                  controller.text = widget.defaults[column.columnIndex] ?? '';
+                  widget.onEdit(column.columnIndex, controller.text);
+                },
+              ),
+            ],
           ),
         ),
       ),
     );
   }
+
+  final Set<int> _generating = {};
+
+  /// The AI button sits inside the product title and description fields.
+  bool _canGenerate(MeeshoTemplateColumn column) =>
+      widget.onGenerate != null &&
+      (column.fieldKey == 'title' || column.fieldKey == 'description');
+
+  Future<void> _generate(MeeshoTemplateColumn column) async {
+    final controller = _controllers[column.columnIndex]!;
+    setState(() => _generating.add(column.columnIndex));
+    final text = await widget.onGenerate!(column, controller.text);
+    if (!mounted) return;
+    setState(() {
+      _generating.remove(column.columnIndex);
+      if (text != null && text.isNotEmpty) {
+        controller.text = text;
+        widget.onEdit(column.columnIndex, text);
+      }
+    });
+  }
+
+  List<Widget> _calculatedTiles(ThemeData theme) => [
+    for (final field in widget.calculated())
+      Padding(
+        padding: const EdgeInsets.only(bottom: AppDimens.md),
+        child: InputDecorator(
+          decoration: InputDecoration(
+            labelText: '${field.header} (auto-calculated)',
+            isDense: true,
+            border: const OutlineInputBorder(),
+          ),
+          child: Text(
+            field.value.isEmpty ? '-' : '₹${field.value}',
+            style: theme.textTheme.bodyLarge?.copyWith(
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ),
+      ),
+  ];
 
   @override
   Widget build(BuildContext context) {
@@ -1300,7 +1450,11 @@ class _TemplateFieldsEditorState extends State<_TemplateFieldsEditor> {
             style: theme.textTheme.bodySmall,
           ),
           const SizedBox(height: AppDimens.sm),
-          for (final column in mapped) _field(column),
+          for (final column in mapped) ...[
+            _field(column),
+            // The template's own price formulas sit right after the price.
+            if (column.fieldKey == 'price') ..._calculatedTiles(theme),
+          ],
         ],
         if (others.isNotEmpty)
           Theme(
@@ -1315,7 +1469,12 @@ class _TemplateFieldsEditorState extends State<_TemplateFieldsEditor> {
                 ),
               ),
               subtitle: const Text('Not required. Edit or fill if needed.'),
-              children: [for (final column in others) _field(column)],
+              children: [
+                for (final column in others) ...[
+                  _field(column),
+                  if (column.fieldKey == 'price') ..._calculatedTiles(theme),
+                ],
+              ],
             ),
           ),
       ],
@@ -2081,4 +2240,79 @@ String _photoFileName(String title, int index, String url) {
       ? 'gif'
       : 'jpg';
   return '$base-photo-${index + 1}.$extension';
+}
+
+/// Asks for the Groq API key used to write SEO titles and descriptions. The key
+/// stays on this device.
+class _GroqKeyDialog extends StatefulWidget {
+  const _GroqKeyDialog({required this.service});
+
+  final SeoService service;
+
+  @override
+  State<_GroqKeyDialog> createState() => _GroqKeyDialogState();
+}
+
+class _GroqKeyDialogState extends State<_GroqKeyDialog> {
+  final TextEditingController _controller = TextEditingController();
+  bool _obscure = true;
+  String? _error;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    try {
+      await widget.service.connect(_controller.text);
+      if (mounted) Navigator.of(context).pop(true);
+    } on SeoException catch (error) {
+      if (mounted) setState(() => _error = error.message);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Groq API key'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'The key is used to write the SEO title and description. It is '
+            'saved on this device only. Create a free key at console.groq.com.',
+          ),
+          const SizedBox(height: AppDimens.md),
+          TextField(
+            controller: _controller,
+            obscureText: _obscure,
+            autofocus: true,
+            decoration: InputDecoration(
+              labelText: 'Groq API key',
+              errorText: _error,
+              border: const OutlineInputBorder(),
+              suffixIcon: IconButton(
+                tooltip: _obscure ? 'Show key' : 'Hide key',
+                icon: Icon(
+                  _obscure ? Icons.visibility_outlined : Icons.visibility_off,
+                ),
+                onPressed: () => setState(() => _obscure = !_obscure),
+              ),
+            ),
+            onSubmitted: (_) => _save(),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(false),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(onPressed: _save, child: const Text('Save key')),
+      ],
+    );
+  }
 }

@@ -29,6 +29,7 @@ class MeeshoTemplateColumn {
     this.existing = '',
     this.options = const [],
     this.inferred = '',
+    this.formula = '',
   });
 
   MeeshoTemplateColumn withOptions(List<String> options) {
@@ -45,6 +46,7 @@ class MeeshoTemplateColumn {
       existing: existing,
       options: options,
       inferred: inferred,
+      formula: formula,
     );
   }
 
@@ -64,11 +66,15 @@ class MeeshoTemplateColumn {
       existing: existing,
       options: options,
       inferred: value,
+      formula: formula,
     );
   }
 
   /// Value worked out from the product for an otherwise unmatched column.
   final String inferred;
+
+  /// The template's formula for this column's data cell, if it has one.
+  final String formula;
 
   /// Dropdown choices defined by the template; empty for free-text columns.
   final List<String> options;
@@ -106,6 +112,17 @@ class MeeshoTemplateColumn {
   final String existing;
 
   bool get isMapped => fieldKey != null && fieldLabel != null;
+}
+
+/// A price the template calculates itself (returns price, customer price),
+/// shown read-only in the app.
+class MeeshoCalculatedField {
+  const MeeshoCalculatedField({required this.header, required this.value});
+
+  final String header;
+
+  /// The result, or empty when it can't be worked out yet.
+  final String value;
 }
 
 class MeeshoTemplate {
@@ -266,7 +283,11 @@ class MeeshoTemplateService {
       fieldKey: mapping?.key,
       fieldLabel: mapping?.label,
       preview: mapping == null ? '' : _previewValue(mapping.key, product),
-      editable: !_ignoredHeader.hasMatch(_normalize(header)),
+      // Unmapped formula columns (such as the auto-calculated returns price)
+      // are worked out from the price, so they are not offered for editing.
+      editable:
+          !_ignoredHeader.hasMatch(_normalize(header)) &&
+          !(mapping == null && existing is FormulaCellValue),
       required:
           required ??
           (raw.trim().startsWith('*') ||
@@ -277,6 +298,9 @@ class MeeshoTemplateService {
           existingText.trim().isNotEmpty &&
           !_isPlaceholder(existingText),
       placeholder: existing != null && _isPlaceholder(existingText),
+      formula: existing is FormulaCellValue
+          ? existing.formula.replaceFirst(RegExp(r'^='), '')
+          : '',
       existing: existing != null && !_isPlaceholder(existingText)
           ? existingText.trim()
           : '',
@@ -515,6 +539,67 @@ class MeeshoTemplateService {
     ];
   }
 
+  /// The template's own price formulas (such as the wrong/defective returns
+  /// price and the customer price), worked out for the current values.
+  List<MeeshoCalculatedField> calculatedFields(
+    MeeshoTemplate template,
+    ProductLinkData product, {
+    Map<int, String> edits = const {},
+  }) {
+    final defaults = defaultValues(template, product);
+    final rowNumber = template.dataRowNumber;
+    final byRef = <String, Object?>{};
+    for (final column in template.columns) {
+      if (column.formula.isNotEmpty) continue;
+      final text =
+          (edits[column.columnIndex] ??
+                  defaults[column.columnIndex] ??
+                  column.existing)
+              .trim();
+      final key = column.fieldKey;
+      final shown = key != null && _numericKeys.contains(key)
+          ? _numericText(key, text) ?? text
+          : text;
+      byRef['${_columnLetters(column.columnIndex)}$rowNumber'] =
+          double.tryParse(shown) ?? shown;
+    }
+    // Price formulas build on helper formulas (such as shipping charges) that
+    // sit further right, so run them in a few passes.
+    final computed = <int, String>{};
+    for (var pass = 0; pass < 4; pass++) {
+      for (final column in template.columns) {
+        if (column.formula.isEmpty || column.isMapped) continue;
+        try {
+          final result = _Formula(column.formula).run((ref) {
+            if (!RegExp('^[A-Z]+$rowNumber\$').hasMatch(ref)) {
+              throw const FormatException('reference outside the data row');
+            }
+            return byRef[ref];
+          });
+          final value = switch (result) {
+            double number when number == number.roundToDouble() =>
+              number.toInt().toString(),
+            final Object? other => other?.toString() ?? '',
+          };
+          computed[column.columnIndex] = value;
+          byRef['${_columnLetters(column.columnIndex)}$rowNumber'] =
+              double.tryParse(value) ?? value;
+        } catch (_) {}
+      }
+    }
+    final fields = <MeeshoCalculatedField>[
+      for (final column in template.columns)
+        if (column.formula.isNotEmpty &&
+            !column.isMapped &&
+            _normalize(column.header).contains('price'))
+          MeeshoCalculatedField(
+            header: column.header,
+            value: computed[column.columnIndex] ?? '',
+          ),
+    ];
+    return fields;
+  }
+
   /// Full (untruncated) product value for every matched column, by column.
   Map<int, String> defaultValues(
     MeeshoTemplate template,
@@ -713,19 +798,15 @@ class MeeshoTemplateService {
           : cell.text;
     });
     // Run twice so a formula can use the result of another one.
-    final computedColumns = <int>{};
     for (var pass = 0; pass < 2; pass++) {
       for (final entry in cells.entries.toList()) {
         final text = entry.value;
-        if (!text.contains('<f>')) continue;
-        if (RegExp(r'<v>[^<]+</v>').hasMatch(text) &&
-            !computedColumns.contains(entry.key)) {
-          continue;
-        }
-        final computed = _computeFormula(text, byRef);
+        if (!RegExp(r'<f[\s>]').hasMatch(text)) continue;
+        // Any stored result is stale once the row's values change (templates
+        // often ship a cached 0), so formulas are always recalculated.
+        final computed = _computeFormula(text, byRef, rowNumber);
         if (computed == null) continue;
         cells[entry.key] = computed;
-        computedColumns.add(entry.key);
         final value = RegExp(r'<v>([^<]*)</v>').firstMatch(computed)?.group(1);
         byRef['${_columnLetters(entry.key)}$rowNumber'] =
             double.tryParse(value ?? '') ?? value;
@@ -770,12 +851,25 @@ class MeeshoTemplateService {
   /// The cell XML with its formula result stored, or null when the formula
   /// can't be worked out (it is then left exactly as the template has it).
   /// Meesho reads stored results, and Excel-made templates ship without them.
-  String? _computeFormula(String cell, Map<String, Object?> values) {
-    final formula = RegExp(r'<f>(.*?)</f>', dotAll: true).firstMatch(cell);
+  String? _computeFormula(
+    String cell,
+    Map<String, Object?> values,
+    int rowNumber,
+  ) {
+    final formula = RegExp(
+      r'<f(?:\s[^>]*)?>(.*?)</f>',
+      dotAll: true,
+    ).firstMatch(cell);
     if (formula == null) return null;
     final Object? result;
     try {
-      result = _Formula(_unescape(formula.group(1)!)).run((ref) => values[ref]);
+      result = _Formula(_unescape(formula.group(1)!)).run((ref) {
+        // Only this row's values are known; anything else can't be worked out.
+        if (!RegExp('^[A-Z]+$rowNumber\$').hasMatch(ref)) {
+          throw const FormatException('reference outside the data row');
+        }
+        return values[ref];
+      });
     } catch (_) {
       return null;
     }
@@ -1070,6 +1164,11 @@ class MeeshoTemplateService {
     return value.trim();
   }
 
+  /// [text] made safe for a Meesho listing (no brand, marketplace names or
+  /// links), for text that did not come straight from the product page.
+  String cleanText(ProductLinkData product, String text) =>
+      _clean(product, text);
+
   String _description(ProductLinkData product) {
     final text = _clean(product, product.description);
     return text.isNotEmpty
@@ -1146,13 +1245,13 @@ class MeeshoTemplateService {
     return '${value.substring(0, 67)}...';
   }
 
-  /// MRP is always the Meesho price plus [_mrpMargin]; the scraped MRP is only
-  /// used when the price itself is unavailable.
+  /// MRP is set so the Meesho price is [_mrpDiscountPercent] percent off it
+  /// (rounded up to a whole rupee). The scraped MRP is only used when the price
+  /// itself is unavailable.
   String _mrpFor(ProductLinkData product) {
     final price = _number(product.price);
     if (price == null) return product.mrp;
-    final mrp = price + _mrpMargin;
-    return mrp == mrp.roundToDouble() ? mrp.toInt().toString() : '$mrp';
+    return '${(price * 100 / (100 - _mrpDiscountPercent)).ceil()}';
   }
 
   String _calculatedDiscount(ProductLinkData product) {
@@ -1425,7 +1524,7 @@ final _ambiguousHeader = RegExp(
   r'customer)\b',
 );
 
-const _mrpMargin = 200;
+const _mrpDiscountPercent = 60;
 const _makerName = 'Mahvin Enterprise';
 const _makerPincode = '382350';
 const _makerAddress = 'Ahmedabad';
@@ -1709,6 +1808,8 @@ class _Formula {
         return _truthy(test) ? a[1] : (a.length > 2 ? a[2] : false);
       case 'IFERROR':
         return a[0] is _FormulaError ? a[1] : a[0];
+      case 'ISBLANK':
+        return a[0] == null || a[0] == '';
       case 'AND':
         return a.every(_truthy);
       case 'OR':

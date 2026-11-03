@@ -766,20 +766,9 @@ class _SuggestionCard extends StatelessWidget {
                       horizontal: AppDimens.sm,
                       vertical: 4,
                     ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          'Copy link',
-                          style: theme.textTheme.bodySmall?.copyWith(
-                            color: scheme.primary,
-                            fontWeight: FontWeight.w700,
-                            fontSize: 11.5,
-                          ),
-                        ),
-                        const SizedBox(width: 3),
-                        Icon(Icons.copy, size: 13, color: scheme.primary),
-                      ],
+                    child: Tooltip(
+                      message: 'Copy link',
+                      child: Icon(Icons.copy, size: 15, color: scheme.primary),
                     ),
                   ),
                 ),
@@ -797,9 +786,8 @@ Future<void> _copyProductLink(BuildContext context, String url) async {
   if (trimmed.isEmpty) return;
   await Clipboard.setData(ClipboardData(text: trimmed));
   if (context.mounted) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Product link copied.')),
-    );
+    ScaffoldMessenger.of(context)
+        .showSnackBar(const SnackBar(content: Text('Product link copied.')));
   }
 }
 
